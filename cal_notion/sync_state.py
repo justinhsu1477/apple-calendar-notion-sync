@@ -1,7 +1,7 @@
-"""增量同步狀態追蹤。
+"""增量同步狀態追蹤（v2 — 支援雙向同步）。
 
-記錄上次同步時間與已同步事件的 UID，
-讓下次同步時只處理新增或修改的事件。
+記錄每個事件在 Calendar 和 Notion 兩側的 content_hash，
+作為 three-way merge 的 baseline，讓下次同步時能精確判斷哪邊改了。
 """
 
 import json
@@ -15,7 +15,7 @@ DEFAULT_STATE_FILE = Path.home() / ".cal-notion" / "sync_state.json"
 
 
 class SyncState:
-    """管理同步狀態的持久化存儲。"""
+    """管理雙向同步狀態的持久化存儲。"""
 
     def __init__(self, state_file: Path | None = None):
         self._file = state_file or DEFAULT_STATE_FILE
@@ -24,10 +24,38 @@ class SyncState:
     def _load(self) -> dict:
         if self._file.exists():
             try:
-                return json.loads(self._file.read_text())
+                data = json.loads(self._file.read_text())
+                if data.get("version", 1) < 2:
+                    return self._migrate_v1_to_v2(data)
+                return data
             except (json.JSONDecodeError, OSError) as e:
                 log.warning(f"讀取同步狀態失敗，將重新建立: {e}")
-        return {"last_sync": None, "synced_uids": {}}
+        return self._empty_state()
+
+    @staticmethod
+    def _empty_state() -> dict:
+        return {"version": 2, "last_sync": None, "records": {}}
+
+    @staticmethod
+    def _migrate_v1_to_v2(old: dict) -> dict:
+        """從 v1 格式遷移到 v2。"""
+        log.info("遷移同步狀態 v1 → v2")
+        records = {}
+        for uid, info in old.get("synced_uids", {}).items():
+            records[uid] = {
+                "calendar_hash": None,
+                "notion_hash": None,
+                "notion_page_id": None,
+                "calendar_name": "",
+                "source": "calendar",
+                "last_modified": info.get("last_modified"),
+                "synced_at": info.get("synced_at"),
+            }
+        return {
+            "version": 2,
+            "last_sync": old.get("last_sync"),
+            "records": records,
+        }
 
     def save(self) -> None:
         self._file.parent.mkdir(parents=True, exist_ok=True)
@@ -40,30 +68,69 @@ class SyncState:
             return datetime.fromisoformat(ts)
         return None
 
-    def mark_synced(self, uid: str, last_modified: str | None = None) -> None:
-        self._data["synced_uids"][uid] = {
+    # ── Record 操作 ───────────────────────────────────
+
+    def get_record(self, uid: str) -> dict | None:
+        """取得某 UID 的同步紀錄。"""
+        return self._data["records"].get(uid)
+
+    def set_record(
+        self,
+        uid: str,
+        calendar_hash: str | None = None,
+        notion_hash: str | None = None,
+        notion_page_id: str | None = None,
+        calendar_name: str = "",
+        source: str = "calendar",
+        last_modified: str | None = None,
+    ) -> None:
+        """建立或更新一筆同步紀錄。"""
+        self._data["records"][uid] = {
+            "calendar_hash": calendar_hash,
+            "notion_hash": notion_hash,
+            "notion_page_id": notion_page_id,
+            "calendar_name": calendar_name,
+            "source": source,
             "last_modified": last_modified,
             "synced_at": datetime.now(timezone.utc).isoformat(),
         }
 
+    def remove_record(self, uid: str) -> None:
+        self._data["records"].pop(uid, None)
+
+    def get_all_records(self) -> dict[str, dict]:
+        return self._data["records"]
+
+    def get_tracked_uids(self) -> set[str]:
+        return set(self._data["records"].keys())
+
+    # ── 向後相容方法（供單向同步使用）────────────────────
+
     def is_modified(self, uid: str, last_modified: str | None) -> bool:
-        """判斷事件是否有變更（新的或 last_modified 不同）。"""
-        record = self._data["synced_uids"].get(uid)
+        record = self._data["records"].get(uid)
         if record is None:
-            return True  # 新事件
+            return True
         if last_modified and record.get("last_modified") != last_modified:
-            return True  # 已修改
+            return True
         return False
 
+    def mark_synced(self, uid: str, last_modified: str | None = None) -> None:
+        existing = self._data["records"].get(uid, {})
+        existing["last_modified"] = last_modified
+        existing["synced_at"] = datetime.now(timezone.utc).isoformat()
+        self._data["records"][uid] = existing
+
     def get_synced_uids(self) -> set[str]:
-        return set(self._data["synced_uids"].keys())
+        return self.get_tracked_uids()
 
     def remove_uid(self, uid: str) -> None:
-        self._data["synced_uids"].pop(uid, None)
+        self.remove_record(uid)
+
+    # ── 通用方法 ──────────────────────────────────────
 
     def update_last_sync(self) -> None:
         self._data["last_sync"] = datetime.now(timezone.utc).isoformat()
 
     def reset(self) -> None:
-        self._data = {"last_sync": None, "synced_uids": {}}
+        self._data = self._empty_state()
         self.save()
