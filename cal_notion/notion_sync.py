@@ -45,6 +45,19 @@ class NotionSync:
         self._notion = NotionClient(auth=token)
         self._database_id = database_id
         self._f = self.FIELD_MAP  # shorthand
+        # notion-client v2.7+ 用 data_sources.query，需要 data_source_id（不同於 database_id）
+        self._data_source_id = self._resolve_data_source_id()
+
+    def _resolve_data_source_id(self) -> str:
+        """從 database_id 解析出 data_source_id。"""
+        try:
+            db = self._notion.databases.retrieve(database_id=self._database_id)
+            sources = db.get("data_sources", [])
+            if sources:
+                return sources[0]["id"]
+        except Exception:
+            pass
+        return self._database_id
 
     # ── 讀取 ──────────────────────────────────────────
 
@@ -77,8 +90,8 @@ class NotionSync:
         start_cursor = None
 
         while has_more:
-            resp = self._notion.databases.query(
-                database_id=self._database_id,
+            resp = self._notion.data_sources.query(
+                data_source_id=self._data_source_id,
                 start_cursor=start_cursor,
             )
             pages.extend(resp["results"])

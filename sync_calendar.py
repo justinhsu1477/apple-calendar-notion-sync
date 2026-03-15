@@ -135,15 +135,28 @@ def _map_status(ical_status: str) -> str:
 
 
 # ── Notion：寫入事件 ──────────────────────────────────
+def _resolve_data_source_id(notion: NotionClient) -> str:
+    """從 database_id 解析出 data_source_id。"""
+    try:
+        db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        sources = db.get("data_sources", [])
+        if sources:
+            return sources[0]["id"]
+    except Exception:
+        pass
+    return NOTION_DATABASE_ID
+
+
 def get_existing_uids(notion: NotionClient) -> dict[str, str]:
     """查詢 Notion 資料庫中已存在的 UID → page_id 對應。"""
     existing = {}
     has_more = True
     start_cursor = None
+    ds_id = _resolve_data_source_id(notion)
 
     while has_more:
-        resp = notion.databases.query(
-            database_id=NOTION_DATABASE_ID,
+        resp = notion.data_sources.query(
+            data_source_id=ds_id,
             start_cursor=start_cursor,
         )
         for page in resp["results"]:
