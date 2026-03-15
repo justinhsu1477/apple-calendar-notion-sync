@@ -11,11 +11,40 @@ log = logging.getLogger(__name__)
 
 
 class NotionSync:
-    """處理事件與 Notion 資料庫的同步（支援雙向讀寫）。"""
+    """處理事件與 Notion 資料庫的同步（支援雙向讀寫）。
+
+    欄位對應（行程摘要資料庫）：
+        名稱 (title)   ← event.summary
+        開始 (date)    ← event.start
+        結束 (date)    ← event.end
+        備註 (text)    ← event.description
+        類別 (select)  ← event.calendar_name  (工作/專案/生活)
+        來源 (select)  ← "Apple Calendar"
+        UID (text)     ← event.uid（同步配對用）
+    """
+
+    # 欄位名稱映射：程式內部 key → Notion 欄位名
+    FIELD_MAP = {
+        "title": "名稱",
+        "start": "開始",
+        "end": "結束",
+        "description": "備註",
+        "category": "類別",
+        "source": "來源",
+        "uid": "UID",
+    }
+
+    # Calendar name → 類別 select 選項映射
+    CATEGORY_MAP = {
+        "Personal": "生活",
+        "Work": "工作",
+        "Family": "生活",
+    }
 
     def __init__(self, token: str, database_id: str):
         self._notion = NotionClient(auth=token)
         self._database_id = database_id
+        self._f = self.FIELD_MAP  # shorthand
 
     # ── 讀取 ──────────────────────────────────────────
 
@@ -23,7 +52,7 @@ class NotionSync:
         """查詢 Notion 資料庫中已存在的 UID → page_id。"""
         existing: dict[str, str] = {}
         for page in self._query_all_pages():
-            uid = self._extract_text(page, "UID")
+            uid = self._extract_text(page, self._f["uid"])
             if uid:
                 existing[uid] = page["id"]
         return existing
@@ -60,18 +89,19 @@ class NotionSync:
 
     def _page_to_event(self, page: dict) -> CalendarEvent | None:
         """將 Notion page 反向映射為 CalendarEvent。"""
-        uid = self._extract_text(page, "UID")
+        uid = self._extract_text(page, self._f["uid"])
         if not uid:
             return None
 
-        summary = self._extract_title(page, "Event Name")
-        description = self._extract_text(page, "Description")
-        location = self._extract_text(page, "Location")
-        status = self._extract_select(page, "Status") or "Upcoming"
-        calendar_name = self._extract_select(page, "Calendar") or ""
+        summary = self._extract_title(page, self._f["title"])
+        description = self._extract_text(page, self._f["description"])
+        category = self._extract_select(page, self._f["category"]) or ""
+        # 反向映射：類別 → calendar name
+        reverse_cat = {v: k for k, v in self.CATEGORY_MAP.items()}
+        calendar_name = reverse_cat.get(category, category)
 
-        start, start_is_dt = self._extract_date(page, "Start Date")
-        end, end_is_dt = self._extract_date(page, "End Date")
+        start, start_is_dt = self._extract_date(page, self._f["start"])
+        end, end_is_dt = self._extract_date(page, self._f["end"])
 
         event = CalendarEvent(
             uid=uid,
@@ -81,9 +111,9 @@ class NotionSync:
             end=end,
             end_is_datetime=end_is_dt,
             description=description,
-            location=location,
+            location="",
             calendar_name=calendar_name,
-            status=status,
+            status="Upcoming",
             last_modified=page.get("last_edited_time"),
             source="notion",
             notion_page_id=page["id"],
@@ -110,11 +140,8 @@ class NotionSync:
         log.info(f"Notion 更新: {event.summary}")
 
     def mark_cancelled(self, page_id: str) -> None:
-        """將事件標記為 Cancelled。"""
-        self._notion.pages.update(
-            page_id=page_id,
-            properties={"Status": {"select": {"name": "Cancelled"}}},
-        )
+        """將事件封存（archive）。"""
+        self._notion.pages.update(page_id=page_id, archived=True)
 
     # ── 單向同步（向後相容）────────────────────────────
 
@@ -191,32 +218,28 @@ class NotionSync:
 
     # ── Property 建構與解析 ────────────────────────────
 
-    @staticmethod
-    def _build_properties(event: CalendarEvent) -> dict:
+    def _build_properties(self, event: CalendarEvent) -> dict:
+        f = self._f
         props: dict = {
-            "Event Name": {"title": [{"text": {"content": event.summary}}]},
-            "UID": {"rich_text": [{"text": {"content": event.uid}}]},
-            "Status": {"select": {"name": event.status}},
+            f["title"]: {"title": [{"text": {"content": event.summary}}]},
+            f["uid"]: {"rich_text": [{"text": {"content": event.uid}}]},
+            f["source"]: {"select": {"name": "Apple Calendar"}},
         }
 
         if event.description:
-            props["Description"] = {
+            props[f["description"]] = {
                 "rich_text": [{"text": {"content": event.description[:2000]}}]
             }
 
-        if event.location:
-            props["Location"] = {
-                "rich_text": [{"text": {"content": event.location}}]
-            }
-
         if event.calendar_name:
-            props["Calendar"] = {"select": {"name": event.calendar_name}}
+            category = self.CATEGORY_MAP.get(event.calendar_name, "生活")
+            props[f["category"]] = {"select": {"name": category}}
 
         if event.start:
-            props["Start Date"] = {"date": {"start": event.start}}
+            props[f["start"]] = {"date": {"start": event.start}}
 
         if event.end:
-            props["End Date"] = {"date": {"start": event.end}}
+            props[f["end"]] = {"date": {"start": event.end}}
 
         return props
 

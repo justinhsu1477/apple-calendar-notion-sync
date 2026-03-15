@@ -1,15 +1,31 @@
 # cal-notion
 
-行事曆與 Notion 的雙向同步工具。支援 Apple iCloud (CalDAV)、Google Calendar (API)，透過統一的 Provider 介面可擴展任意來源。
+Apple Calendar (iCloud CalDAV) 與 Notion 的雙向同步工具。自動將行事曆事件同步到 Notion 資料庫，支援 Google Calendar，透過 Provider 介面可擴展。
 
 ## 功能
 
-- **雙向同步** — Calendar ↔ Notion，任一端修改都會同步到另一端
-- **多來源支援** — Apple iCloud、Google Calendar，可擴展
+- **雙向同步** — Calendar ↔ Notion，任一端修改都會同步
+- **多來源支援** — Apple iCloud (CalDAV)、Google Calendar (API)
 - **智慧變更偵測** — content hash + three-way merge，只同步有改動的事件
 - **衝突解決** — newest_wins / calendar_wins / notion_wins
-- **背景服務** — macOS LaunchAgent 自動定時同步
+- **背景服務** — macOS LaunchAgent 每 15 分鐘自動同步
 - **CLI 工具** — 完整命令列介面
+
+## Notion 資料庫欄位
+
+對應 Notion「行程摘要」資料庫：
+
+| Notion 欄位 | 類型 | 來源 |
+|-------------|------|------|
+| 名稱 | title | 事件標題 |
+| 開始 | date | 開始時間 |
+| 結束 | date | 結束時間 |
+| 備註 | text | 事件描述 |
+| 類別 | select | 工作 / 專案 / 生活 |
+| 來源 | select | Apple Calendar |
+| UID | text | 同步配對用（需手動新增） |
+
+> **注意**：資料庫需要手動新增 **UID** 欄位（文字類型），用於配對行事曆與 Notion 事件。
 
 ## 架構
 
@@ -25,7 +41,7 @@ CalendarProvider (Strategy Pattern)
   BidirectionalSyncEngine (three-way merge)
           │
           ▼
-    NotionSync ←→ Notion Database
+    NotionSync ←→ Notion 行程摘要
 ```
 
 ## 安裝
@@ -33,6 +49,7 @@ CalendarProvider (Strategy Pattern)
 ```bash
 git clone https://github.com/justinhsu1477/apple-calendar-notion-sync.git
 cd apple-calendar-notion-sync
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
 # Google Calendar 額外安裝
@@ -43,17 +60,18 @@ pip install -e ".[google]"
 
 ### 1. 前置準備
 
-| 來源 | 步驟 |
+| 項目 | 步驟 |
 |------|------|
-| **Apple** | [appleid.apple.com](https://appleid.apple.com) → 登入與安全性 → App 專用密碼 |
-| **Google** | [Cloud Console](https://console.cloud.google.com/) → OAuth 2.0 credentials → 下載 `credentials.json` |
-| **Notion** | [notion.so/my-integrations](https://www.notion.so/my-integrations) → 建立 Integration → 到資料庫 `⋯` → Connections 加入 |
+| **Apple App 專用密碼** | [appleid.apple.com](https://appleid.apple.com) → 登入與安全性 → App 專用密碼 |
+| **Notion Integration** | [notion.so/my-integrations](https://www.notion.so/my-integrations) → 建立 Internal Integration |
+| **連結資料庫** | 到「行程摘要」→ `⋯` → Connections → 加入 Integration |
+| **新增 UID 欄位** | 在「行程摘要」資料庫新增一個「UID」文字欄位 |
 
 ### 2. 設定並同步
 
 ```bash
 cal-notion setup                          # 互動式設定
-cal-notion sync                           # 單向同步（Calendar → Notion）
+cal-notion sync                           # Calendar → Notion
 cal-notion sync -d bidirectional          # 雙向同步
 cal-notion sync --force                   # 強制全量同步
 ```
@@ -61,7 +79,7 @@ cal-notion sync --force                   # 強制全量同步
 ### 3. 背景服務
 
 ```bash
-cal-notion daemon start                   # 啟動（每 15 分鐘自動同步）
+cal-notion daemon start                   # 啟動
 cal-notion daemon stop                    # 停止
 cal-notion daemon status                  # 查看狀態
 cal-notion daemon logs                    # 查看日誌
@@ -81,20 +99,18 @@ cal-notion daemon logs                    # 查看日誌
 
 ## 同步原理
 
-使用 **content hash + three-way merge**，對每個事件比對 Calendar 側、Notion 側、上次同步的 baseline：
+使用 **content hash + three-way merge**：
 
 | 情境 | 動作 |
 |------|------|
-| 兩邊 hash 都沒變 | 略過 |
-| Calendar 變了、Notion 沒變 | Calendar → Notion |
-| Notion 變了、Calendar 沒變 | Notion → Calendar |
+| 兩邊都沒變 | 略過 |
+| Calendar 變了 | Calendar → Notion |
+| Notion 變了 | Notion → Calendar |
 | 兩邊都變了 | 依衝突策略解決 |
-| 只存在一邊（無 baseline） | 新事件，建到另一邊 |
-| 只存在一邊（有 baseline） | 對方刪除了，同步刪除 |
+| 只存在一邊（新事件） | 建到另一邊 |
+| 只存在一邊（有 baseline） | 同步刪除 |
 
 ## 自訂 Provider
-
-實作 `CalendarProvider` 介面即可擴展新來源：
 
 ```python
 from cal_notion.providers.base import CalendarProvider
@@ -108,23 +124,11 @@ class OutlookProvider(CalendarProvider):
     def authenticate(self) -> None: ...
     def fetch_events(self, start, end, calendar_names=None) -> list[CalendarEvent]: ...
     def list_calendars(self) -> list[str]: ...
-
-    # 可選：實作寫入支援
-    @property
-    def supports_write(self) -> bool:
-        return True
-    def create_event(self, event, calendar_name) -> str: ...
-    def update_event(self, event) -> None: ...
-    def delete_event(self, uid, calendar_name) -> None: ...
 ```
 
 ## Tech Stack
 
-Python 3.11+ / [caldav](https://github.com/python-caldav/caldav) / [icalendar](https://github.com/collective/icalendar) / [notion-client](https://github.com/ramnes/notion-sdk-py) / [typer](https://github.com/tiangolo/typer) / [google-api-python-client](https://github.com/googleapis/google-api-python-client) (optional)
-
-## Contributing
-
-歡迎貢獻！特別是新 Provider (Outlook, CalDAV 通用)、Recurring Events (RRULE) 處理、Docker 部署。
+Python 3.11+ / [caldav](https://github.com/python-caldav/caldav) / [icalendar](https://github.com/collective/icalendar) / [notion-client](https://github.com/ramnes/notion-sdk-py) / [typer](https://github.com/tiangolo/typer)
 
 ## License
 

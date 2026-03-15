@@ -147,6 +147,7 @@ def get_existing_uids(notion: NotionClient) -> dict[str, str]:
             start_cursor=start_cursor,
         )
         for page in resp["results"]:
+            # 行程摘要資料庫的 UID 欄位
             uid_prop = page["properties"].get("UID", {})
             rich_text = uid_prop.get("rich_text", [])
             if rich_text:
@@ -159,42 +160,35 @@ def get_existing_uids(notion: NotionClient) -> dict[str, str]:
     return existing
 
 
+CATEGORY_MAP = {
+    "Personal": "生活",
+    "Work": "工作",
+    "Family": "生活",
+}
+
+
 def _build_properties(event: dict) -> dict:
-    """將事件 dict 轉為 Notion page properties。"""
+    """將事件 dict 轉為 Notion page properties（對應行程摘要資料庫）。"""
     props = {
-        "Event Name": {"title": [{"text": {"content": event["summary"]}}]},
+        "名稱": {"title": [{"text": {"content": event["summary"]}}]},
         "UID": {"rich_text": [{"text": {"content": event["uid"]}}]},
-        "Status": {"select": {"name": event["status"]}},
+        "來源": {"select": {"name": "Apple Calendar"}},
     }
 
     if event["description"]:
-        props["Description"] = {
+        props["備註"] = {
             "rich_text": [{"text": {"content": event["description"][:2000]}}]
         }
 
-    if event["location"]:
-        props["Location"] = {
-            "rich_text": [{"text": {"content": event["location"]}}]
-        }
-
-    # Calendar select — 如果不在預設選項中，歸為 Other
     cal_name = event["calendar"]
-    if cal_name in ("Personal", "Work"):
-        props["Calendar"] = {"select": {"name": cal_name}}
-    else:
-        props["Calendar"] = {"select": {"name": cal_name}}
+    category = CATEGORY_MAP.get(cal_name, "生活")
+    props["類別"] = {"select": {"name": category}}
 
-    # Start Date
     if event["start"]:
-        start_date = {"start": event["start"]}
-        if not event["start_is_datetime"]:
-            start_date["start"] = event["start"]
-        props["Start Date"] = {"date": start_date}
+        props["開始"] = {"date": {"start": event["start"]}}
 
-    # End Date
     if event["end"]:
-        end_date = {"start": event["end"]}
-        props["End Date"] = {"date": end_date}
+        props["結束"] = {"date": {"start": event["end"]}}
 
     return props
 

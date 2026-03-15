@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .venv/
 cal_notion.egg-info/
+.idea/
