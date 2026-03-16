@@ -33,10 +33,14 @@ DEFAULT_CONFIG = {
     "conflict_strategy": "newest_wins",  # newest_wins / calendar_wins / notion_wins
     "daemon_interval_minutes": 15,
     "timezone": "Asia/Taipei",
+    "anthropic_api_key": "",
+    "hourly_rate": 500,
+    "line_notify_token": "",
+    "slack_webhook_url": "",
 }
 
 # 敏感欄位，顯示時遮蔽
-SENSITIVE_FIELDS = {"apple_app_password", "notion_token", "google_credentials_file"}
+SENSITIVE_FIELDS = {"apple_app_password", "notion_token", "google_credentials_file", "anthropic_api_key", "line_notify_token", "slack_webhook_url"}
 
 
 class Config:
@@ -72,11 +76,16 @@ class Config:
             "conflict_strategy": os.getenv("CONFLICT_STRATEGY", "newest_wins"),
             "daemon_interval_minutes": int(os.getenv("DAEMON_INTERVAL_MINUTES", 15)),
             "timezone": os.getenv("TIMEZONE", "Asia/Taipei"),
+            "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
+            "hourly_rate": int(os.getenv("HOURLY_RATE", 500)),
+            "line_notify_token": os.getenv("LINE_NOTIFY_TOKEN", ""),
+            "slack_webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
         }
 
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(self._data, indent=2, ensure_ascii=False))
+        CONFIG_FILE.chmod(0o600)
         log.info(f"設定已儲存至 {CONFIG_FILE}")
 
     def get(self, key: str, default=None):

@@ -5,6 +5,7 @@ import logging
 from notion_client import Client as NotionClient
 
 from cal_notion.models import CalendarEvent
+from cal_notion.retry import with_retry
 from cal_notion.sync_state import SyncState
 
 log = logging.getLogger(__name__)
@@ -34,16 +35,22 @@ class NotionSync:
         "uid": "UID",
     }
 
-    # Calendar name → 類別 select 選項映射
+    # iOS Calendar name → 類別 select 選項映射
     CATEGORY_MAP = {
+        "生活": "生活",
+        "工作": "工作",
+        "一般": "一般",
+        "籃球比賽": "籃球比賽",
+        # 英文名稱向後相容
         "Personal": "生活",
         "Work": "工作",
         "Family": "生活",
     }
 
-    def __init__(self, token: str, database_id: str):
+    def __init__(self, token: str, database_id: str, dry_run: bool = False):
         self._notion = NotionClient(auth=token)
         self._database_id = database_id
+        self._dry_run = dry_run
         self._f = self.FIELD_MAP  # shorthand
         # notion-client v2.7+ 用 data_sources.query，需要 data_source_id（不同於 database_id）
         self._data_source_id = self._resolve_data_source_id()
@@ -58,6 +65,11 @@ class NotionSync:
         except Exception:
             pass
         return self._database_id
+
+    @with_retry(max_retries=3, base_delay=1.0)
+    def _api_call(self, fn, **kwargs):
+        """Wrap Notion API calls with retry logic."""
+        return fn(**kwargs)
 
     # ── 讀取 ──────────────────────────────────────────
 
@@ -90,7 +102,8 @@ class NotionSync:
         start_cursor = None
 
         while has_more:
-            resp = self._notion.data_sources.query(
+            resp = self._api_call(
+                self._notion.data_sources.query,
                 data_source_id=self._data_source_id,
                 start_cursor=start_cursor,
             )
@@ -138,8 +151,12 @@ class NotionSync:
 
     def create_page(self, event: CalendarEvent) -> str:
         """在 Notion 建立新事件頁面，回傳 page_id。"""
+        if self._dry_run:
+            log.info(f"[DRY-RUN] 將新增: {event.summary}")
+            return "dry-run-id"
         props = self._build_properties(event)
-        resp = self._notion.pages.create(
+        resp = self._api_call(
+            self._notion.pages.create,
             parent={"database_id": self._database_id},
             properties=props,
         )
@@ -148,13 +165,19 @@ class NotionSync:
 
     def update_page(self, page_id: str, event: CalendarEvent) -> None:
         """更新 Notion 事件頁面。"""
+        if self._dry_run:
+            log.info(f"[DRY-RUN] 將更新: {event.summary}")
+            return
         props = self._build_properties(event)
-        self._notion.pages.update(page_id=page_id, properties=props)
+        self._api_call(self._notion.pages.update, page_id=page_id, properties=props)
         log.info(f"Notion 更新: {event.summary}")
 
     def mark_cancelled(self, page_id: str) -> None:
         """將事件封存（archive）。"""
-        self._notion.pages.update(page_id=page_id, archived=True)
+        if self._dry_run:
+            log.info(f"[DRY-RUN] 將封存: {page_id}")
+            return
+        self._api_call(self._notion.pages.update, page_id=page_id, archived=True)
 
     # ── 單向同步（向後相容）────────────────────────────
 
@@ -182,28 +205,38 @@ class NotionSync:
             props = self._build_properties(event)
 
             if event.uid in existing:
-                try:
-                    self._notion.pages.update(
-                        page_id=existing[event.uid], properties=props
-                    )
+                if self._dry_run:
+                    log.info(f"[DRY-RUN] 將更新: {event.summary}")
                     stats["updated"] += 1
-                    log.info(f"更新: {event.summary}")
-                except Exception as e:
-                    log.error(f"更新失敗 {event.summary}: {e}")
-                    stats["skipped"] += 1
-                    continue
+                else:
+                    try:
+                        self._api_call(
+                            self._notion.pages.update,
+                            page_id=existing[event.uid], properties=props,
+                        )
+                        stats["updated"] += 1
+                        log.info(f"更新: {event.summary}")
+                    except Exception as e:
+                        log.error(f"更新失敗 {event.summary}: {e}")
+                        stats["skipped"] += 1
+                        continue
             else:
-                try:
-                    self._notion.pages.create(
-                        parent={"database_id": self._database_id},
-                        properties=props,
-                    )
+                if self._dry_run:
+                    log.info(f"[DRY-RUN] 將新增: {event.summary}")
                     stats["created"] += 1
-                    log.info(f"新增: {event.summary}")
-                except Exception as e:
-                    log.error(f"新增失敗 {event.summary}: {e}")
-                    stats["skipped"] += 1
-                    continue
+                else:
+                    try:
+                        self._api_call(
+                            self._notion.pages.create,
+                            parent={"database_id": self._database_id},
+                            properties=props,
+                        )
+                        stats["created"] += 1
+                        log.info(f"新增: {event.summary}")
+                    except Exception as e:
+                        log.error(f"新增失敗 {event.summary}: {e}")
+                        stats["skipped"] += 1
+                        continue
 
             state.mark_synced(event.uid, event.last_modified)
 

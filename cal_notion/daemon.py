@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from cal_notion.config import Config, CONFIG_DIR
+from cal_notion.lock import SyncLock
 from cal_notion.notion_sync import NotionSync
 from cal_notion.providers import get_provider
 from cal_notion.sync_engine import BidirectionalSyncEngine
@@ -69,6 +70,11 @@ class SyncDaemon:
 
     def _run_sync(self) -> None:
         """執行一次同步。"""
+        lock = SyncLock()
+        if not lock.acquire():
+            log.warning("略過本次同步：另一個同步程序正在執行中")
+            return
+
         try:
             config = self._config
             provider = get_provider(config.get("provider"), config=config.get_provider_config())
@@ -108,6 +114,8 @@ class SyncDaemon:
         except Exception as e:
             log.error(f"同步失敗: {e}", exc_info=True)
             self._write_status(success=False, error=str(e))
+        finally:
+            lock.release()
 
     @staticmethod
     def _write_status(success: bool, error: str = "") -> None:

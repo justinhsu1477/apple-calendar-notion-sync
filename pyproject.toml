@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cal-notion"
-version = "0.3.0"
+version = "0.4.0"
 description = "Bidirectional sync between calendar (Apple/Google) and Notion database"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,12 @@ dependencies = [
 google = [
     "google-auth-oauthlib>=1.0.0",
     "google-api-python-client>=2.0.0",
+]
+web = [
+    "flask>=3.0.0",
+]
+ai = [
+    "anthropic>=0.40.0",
 ]
 
 [project.scripts]
